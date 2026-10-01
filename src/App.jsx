@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 const XP_PER_LEVEL = 200;
 const STORAGE_PREFIX = 'fq_';
@@ -25,9 +25,16 @@ const ENEMIES = [
   { name: 'Raja Prokrastinasi', icon: '⏳', xp: 180 },
 ];
 
+const BOSS_MONSTERS = [
+  { name: 'Procrastination Demon', icon: '👹', maxHp: 100, dropXp: 120, drop: 'Flame Sigil' },
+  { name: 'Distraction Dragon', icon: '🐲', maxHp: 150, dropXp: 180, drop: 'Focus Crystal' },
+  { name: 'The Endless Scroll', icon: '📱', maxHp: 125, dropXp: 150, drop: 'Willpower Rune' },
+];
+
 const SKILLS = [
-  { id: 'doubler', name: 'XP Booster 2x', icon: '✦', cost: 50, description: 'Gandakan XP dari quest dan sesi fokus selama 15 menit.', color: '#e8bd70' },
-  { id: 'freeze', name: 'Timer Freeze', icon: '❄', cost: 35, description: 'Bekukan hitungan timer fokus selama 5 menit.', color: '#88a8e8' },
+  { id: 'doubler', name: 'Double XP Potions', icon: '🧪', cost: 50, description: 'Gandakan XP dari quest dan sesi fokus selama 15 menit.', color: '#e8bd70' },
+  { id: 'critical', name: 'Critical Strike', icon: '⚔', cost: 45, description: 'Serangan boss dari quest berikutnya memberikan damage 2x.', color: '#ed8774' },
+  { id: 'freeze', name: 'Time Freeze', icon: '❄', cost: 35, description: 'Bekukan hitungan timer fokus selama 5 menit.', color: '#88a8e8' },
   { id: 'rest', name: 'Quick Rest', icon: '◷', cost: 30, description: 'Selesaikan waktu istirahat sekarang, atau pulihkan 20 energi.', color: '#70c9ad' },
   { id: 'shield', name: 'Streak Shield', icon: '⬡', cost: 40, description: 'Lindungi streak dari satu sesi fokus yang dibatalkan.', color: '#e18b77' },
 ];
@@ -80,6 +87,9 @@ const sound = {
   click: () => playTone(560, 0, 0.05),
   xp: () => { playTone(520); playTone(760, 0.08); },
   buy: () => { playTone(600); playTone(780, 0.08); playTone(960, 0.16); },
+  attack: () => { playTone(220, 0, 0.08, 'sawtooth'); playTone(110, 0.04, 0.12, 'triangle'); },
+  coin: () => { playTone(880, 0, 0.08); playTone(1175, 0.07, 0.12); },
+  victory: () => [523, 659, 784, 1047, 1319].forEach((note, index) => playTone(note, index * 0.11, 0.28, 'triangle')),
   level: () => [523, 659, 784, 1047].forEach((note, index) => playTone(note, index * 0.09, 0.22)),
 };
 
@@ -93,15 +103,26 @@ export default function App() {
   const [level, setLevel] = useState(() => load('level', 1));
   const [earnedXp, setEarnedXp] = useState(() => load('earnedXp', load('xp', 0)));
   const [tasks, setTasks] = useState(() => load('tasks', INITIAL_TASKS));
-  const [inventory, setInventory] = useState(() => ({ doubler: 0, freeze: 0, rest: 0, shield: 0, ...load('skills', {}) }));
+  const [inventory, setInventory] = useState(() => ({ doubler: 0, critical: 0, freeze: 0, rest: 0, shield: 0, ...load('skills', {}) }));
   const [doublerUntil, setDoublerUntil] = useState(() => load('doublerUntil', 0));
   const [freezeUntil, setFreezeUntil] = useState(() => load('freezeUntil', 0));
   const [shieldArmed, setShieldArmed] = useState(() => load('shieldArmed', false));
+  const [criticalArmed, setCriticalArmed] = useState(() => load('criticalArmed', false));
+  const [bossIndex, setBossIndex] = useState(() => Math.min(BOSS_MONSTERS.length - 1, Math.max(0, load('bossIndex', 0))));
+  const [bossHp, setBossHp] = useState(() => load('bossHp', BOSS_MONSTERS[0].maxHp));
+  const [bossKills, setBossKills] = useState(() => load('bossKills', 0));
+  const [lootDrops, setLootDrops] = useState(() => load('lootDrops', []));
+  const [bossVictory, setBossVictory] = useState(() => load('bossVictory', null));
+  const [damageFloats, setDamageFloats] = useState([]);
+  const [bossHit, setBossHit] = useState(false);
+  const damageSequence = useRef(0);
+  const earnedXpRef = useRef(earnedXp);
+  const levelRef = useRef(level);
   const [streak, setStreak] = useState(() => load('streak', 3));
   const [hp, setHp] = useState(() => load('hp', 100));
   const [energy, setEnergy] = useState(() => load('energy', 100));
   const [soundOn, setSoundOn] = useState(() => load('soundOn', true));
-  const [tab, setTab] = useState('timer');
+  const [tab, setTab] = useState('boss');
   const [timerMode, setTimerMode] = useState(() => load('timerMode', 'work'));
   const [timeLeft, setTimeLeft] = useState(() => load('timeLeft', 25 * 60));
   const [running, setRunning] = useState(() => load('running', false));
@@ -111,11 +132,11 @@ export default function App() {
   const [isBoss, setIsBoss] = useState(false);
   const [enemyIndex, setEnemyIndex] = useState(0);
   const [mascotMessage, setMascotMessage] = useState(getMessage);
-  const [bossMessage, setBossMessage] = useState(null);
   const [levelToast, setLevelToast] = useState(false);
   const [now, setNow] = useState(0);
 
   const rank = getRank(level);
+  const boss = BOSS_MONSTERS[bossIndex];
   const activeDoubler = doublerUntil > now;
   const timerFrozen = freezeUntil > now;
   const xpProgress = earnedXp % XP_PER_LEVEL;
@@ -124,9 +145,9 @@ export default function App() {
   const timerProgress = Math.min(100, Math.max(0, ((totalSeconds - timeLeft) / totalSeconds) * 100));
 
   useEffect(() => {
-    const values = { xp, level, earnedXp, tasks, skills: inventory, doublerUntil, freezeUntil, shieldArmed, streak, hp, energy, soundOn, timerMode, timeLeft, running, sessionStarted };
+    const values = { xp, level, earnedXp, tasks, skills: inventory, doublerUntil, freezeUntil, shieldArmed, criticalArmed, streak, hp, energy, bossIndex, bossHp, bossKills, lootDrops, bossVictory, soundOn, timerMode, timeLeft, running, sessionStarted };
     Object.entries(values).forEach(([key, value]) => save(key, value));
-  }, [xp, level, earnedXp, tasks, inventory, doublerUntil, freezeUntil, shieldArmed, streak, hp, energy, soundOn, timerMode, timeLeft, running, sessionStarted]);
+  }, [xp, level, earnedXp, tasks, inventory, doublerUntil, freezeUntil, shieldArmed, criticalArmed, streak, hp, energy, bossIndex, bossHp, bossKills, lootDrops, bossVictory, soundOn, timerMode, timeLeft, running, sessionStarted]);
 
   useEffect(() => {
     const syncClock = () => setNow(Date.now());
@@ -141,22 +162,44 @@ export default function App() {
   const awardXP = useCallback((amount) => {
     const total = Math.round(amount * (activeDoubler ? 2 : 1));
     if (soundOn) sound.xp();
-    setEarnedXp((previous) => previous + total);
-    setXp((previous) => {
-      const next = previous + total;
-      const nextLevel = Math.floor((earnedXp + total) / XP_PER_LEVEL) + 1;
-      setLevel((current) => {
-        if (nextLevel > current) {
-          setLevelToast(true);
-          if (soundOn) window.setTimeout(sound.level, 120);
-          window.setTimeout(() => setLevelToast(false), 2600);
-          setMascotMessage(getMessage());
-        }
-        return nextLevel;
-      });
-      return next;
-    });
-  }, [activeDoubler, earnedXp, soundOn]);
+    const nextEarnedXp = earnedXpRef.current + total;
+    earnedXpRef.current = nextEarnedXp;
+    setEarnedXp(nextEarnedXp);
+    setXp((previous) => previous + total);
+    const nextLevel = Math.floor(nextEarnedXp / XP_PER_LEVEL) + 1;
+    if (nextLevel > levelRef.current) {
+      levelRef.current = nextLevel;
+      setLevel(nextLevel);
+      setLevelToast(true);
+      if (soundOn) window.setTimeout(sound.level, 120);
+      window.setTimeout(() => setLevelToast(false), 2600);
+      setMascotMessage(getMessage());
+    }
+  }, [activeDoubler, soundOn]);
+
+  const attackBoss = useCallback((baseDamage, fromQuest = false) => {
+    if (bossHp <= 0) return;
+    const critical = fromQuest && criticalArmed;
+    const damage = Math.max(1, Math.round(baseDamage * (critical ? 2 : 1)));
+    const remainingHp = Math.max(0, bossHp - damage);
+    if (soundOn) sound.attack();
+    if (critical) setCriticalArmed(false);
+    setBossHit(true);
+    window.setTimeout(() => setBossHit(false), 420);
+    const floatId = ++damageSequence.current;
+    setDamageFloats((previous) => [...previous, { id: floatId, damage, critical }]);
+    window.setTimeout(() => setDamageFloats((previous) => previous.filter((float) => float.id !== floatId)), 1300);
+    setBossHp(remainingHp);
+
+    if (remainingHp === 0) {
+      const reward = Math.round(boss.dropXp * (activeDoubler ? 2 : 1));
+      setBossVictory({ name: boss.name, icon: boss.icon, drop: boss.drop, xp: reward });
+      setBossKills((previous) => previous + 1);
+      setLootDrops((previous) => [boss.drop, ...previous].slice(0, 12));
+      if (soundOn) sound.victory();
+      awardXP(boss.dropXp);
+    }
+  }, [boss, bossHp, criticalArmed, activeDoubler, soundOn, awardXP]);
 
   useEffect(() => {
     if (!running) return undefined;
@@ -166,6 +209,7 @@ export default function App() {
         setRunning(false);
         setSessionStarted(false);
         if (timerMode === 'work') {
+          attackBoss(25);
           awardXP(50);
           setStreak((previous) => previous + 1);
           setHp((previous) => Math.min(100, previous + 5));
@@ -182,7 +226,7 @@ export default function App() {
       }
     }, 1000);
     return () => window.clearTimeout(timer);
-  }, [running, timeLeft, timerMode, longBreak, timerFrozen, awardXP]);
+  }, [running, timeLeft, timerMode, longBreak, timerFrozen, attackBoss, awardXP]);
 
   const play = () => {
     if (soundOn) sound.click();
@@ -227,6 +271,8 @@ export default function App() {
     setInventory((previous) => ({ ...previous, [skillId]: previous[skillId] - 1 }));
     if (skillId === 'doubler') {
       setDoublerUntil(now + 15 * 60 * 1000);
+    } else if (skillId === 'critical') {
+      setCriticalArmed(true);
     } else if (skillId === 'freeze') {
       setFreezeUntil(now + 5 * 60 * 1000);
     } else if (skillId === 'rest') {
@@ -261,13 +307,19 @@ export default function App() {
   const completeTask = (task) => {
     if (task.done) return;
     setTasks((previous) => previous.map((item) => item.id === task.id ? { ...item, done: true } : item));
+    attackBoss(task.boss ? 40 : 25, true);
     if (task.boss) {
-      const enemy = ENEMIES[task.enemy || 0];
-      setBossMessage({ enemy, xp: task.reward * 2 * (activeDoubler ? 2 : 1) });
       setHp((previous) => Math.min(100, previous + 15));
-      window.setTimeout(() => setBossMessage(null), 2800);
     }
     awardXP(task.reward * (task.boss ? 2 : 1));
+  };
+
+  const challengeNextBoss = () => {
+    const nextIndex = (bossIndex + 1) % BOSS_MONSTERS.length;
+    if (soundOn) sound.coin();
+    setBossIndex(nextIndex);
+    setBossHp(BOSS_MONSTERS[nextIndex].maxHp);
+    setBossVictory(null);
   };
 
   const container = { width: 'min(100% - 40px, 1050px)', margin: '0 auto' };
@@ -283,6 +335,9 @@ export default function App() {
         @keyframes fq-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
         @keyframes fq-pop{0%{opacity:0;transform:translate(-50%,-45%) scale(.9)}100%{opacity:1;transform:translate(-50%,-50%) scale(1)}}
         @keyframes fq-ko{0%{transform:scale(1) rotate(0)}35%{transform:scale(1.24) rotate(-12deg)}70%{transform:scale(.78) rotate(12deg);opacity:.55}100%{transform:scale(.2) rotate(25deg);opacity:0}}
+        @keyframes fq-hit{0%,100%{transform:translateX(0) scale(1);filter:brightness(1)}25%{transform:translateX(-9px) scale(1.05);filter:brightness(1.8)}65%{transform:translateX(8px) scale(.98);filter:brightness(1.3)}}
+        @keyframes fq-damage{0%{opacity:0;transform:translateY(12px) scale(.8)}15%{opacity:1;transform:translateY(0) scale(1.08)}75%{opacity:1}100%{opacity:0;transform:translateY(-45px) scale(.92)}}
+        @media(max-width:1000px){.fq-header-actions{flex:1 1 100%;width:100%;justify-content:space-between}}
         @media(max-width:680px){.fq-hero{grid-template-columns:1fr!important;padding-top:50px!important}.fq-hero-art{display:none!important}.fq-feature-grid{grid-template-columns:1fr!important}.fq-header-actions{width:100%;justify-content:space-between}.fq-tabs{overflow:auto}.fq-tab{white-space:nowrap}.fq-content-grid{grid-template-columns:1fr!important}.fq-task-row{align-items:flex-start!important}.fq-desktop-label{display:none}}
         @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
       `}</style>
@@ -295,7 +350,7 @@ export default function App() {
           </button>
           <div className="fq-header-actions" style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 14, flex: 1, flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 180 }}>
-              <span style={{ fontSize: 29, width: 40, textAlign: 'center' }}>{rank.mascot}</span>
+              <button onClick={() => { if (soundOn) sound.click(); setMascotMessage(getMessage()); }} aria-label="Maskot: pesan motivasi baru" title="Klik maskot untuk motivasi" style={{ fontSize: 29, width: 40, textAlign: 'center', border: 0, padding: 0, background: 'transparent', cursor: 'pointer' }}>{rank.mascot}</button>
               <div><strong style={{ display: 'block', color: rank.color, fontSize: 12 }}>Lv. {level} · {rank.title}</strong><span style={{ color: '#c3cec5', fontSize: 11 }}>✦ {xp} XP</span></div>
             </div>
             <div style={{ display: 'grid', gap: 6, width: 'min(100%, 310px)' }}>
@@ -353,8 +408,36 @@ export default function App() {
           </section>
 
           <nav className="fq-tabs" aria-label="Dashboard" style={{ display: 'flex', gap: 6, padding: 5, borderRadius: 11, background: 'rgba(226,237,232,.055)', width: 'fit-content', maxWidth: '100%', marginBottom: 18 }}>
-            {[['timer', '◷ Focus Timer'], ['quests', `☷ Quest Log · ${activeQuests}`], ['skills', '✦ Skill Shop']].map(([key, label]) => <button className="fq-tab" key={key} onClick={() => { if (soundOn) sound.click(); setTab(key); }} style={{ ...button, padding: '9px 14px', background: tab === key ? '#d3ad69' : 'transparent', color: tab === key ? '#15211b' : '#bac7bd' }}>{label}</button>)}
+            {[['boss', `⚔ Boss Battle · ${bossKills}`], ['timer', '◷ Focus Timer'], ['quests', `☷ Quest Log · ${activeQuests}`], ['skills', '✦ Skill Shop']].map(([key, label]) => <button className="fq-tab" key={key} onClick={() => { if (soundOn) sound.click(); setTab(key); }} style={{ ...button, padding: '9px 14px', background: tab === key ? '#d3ad69' : 'transparent', color: tab === key ? '#15211b' : '#bac7bd' }}>{label}</button>)}
           </nav>
+
+          {tab === 'boss' && <section style={{ ...panel, overflow: 'hidden', position: 'relative', padding: 'clamp(20px, 5vw, 38px)', background: 'radial-gradient(ellipse at 50% 43%, rgba(140,60,48,.19), transparent 44%), linear-gradient(145deg, rgba(34,35,33,.98), rgba(18,25,22,.97))' }}>
+            <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', opacity: .18, backgroundImage: 'linear-gradient(rgba(214,184,128,.12) 1px, transparent 1px), linear-gradient(90deg, rgba(214,184,128,.12) 1px, transparent 1px)', backgroundSize: '34px 34px', maskImage: 'linear-gradient(transparent, black 35%, black 75%, transparent)' }} />
+            <div style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+              <div><div style={{ color: '#df8b76', fontSize: 11, fontWeight: 900, letterSpacing: '.18em' }}>THE FOCUS ARENA</div><h2 style={{ margin: '5px 0 0', fontSize: 22 }}>Boss Battle</h2></div>
+              <span style={{ color: '#c8b98f', border: '1px solid rgba(211,173,105,.22)', background: 'rgba(211,173,105,.07)', borderRadius: 99, padding: '7px 11px', fontSize: 11 }}>VICTORIES · {bossKills}</span>
+            </div>
+            <div style={{ position: 'relative', maxWidth: 650, margin: '25px auto 0' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'end', marginBottom: 9 }}><strong style={{ fontSize: 15, color: '#f1e9dc' }}>{boss.name}</strong><span style={{ fontSize: 12, color: '#e78575', fontWeight: 800 }}>HP {bossHp}/{boss.maxHp}</span></div>
+              <div style={{ height: 12, padding: 2, borderRadius: 99, background: '#261b1c', border: '1px solid rgba(228,127,111,.3)', overflow: 'hidden' }}><div style={{ width: `${bossHp / boss.maxHp * 100}%`, height: '100%', borderRadius: 99, background: 'linear-gradient(90deg, #a73f42, #ed8a73)', transition: 'width .5s cubic-bezier(.2,.8,.2,1)', boxShadow: '0 0 15px rgba(237,138,115,.42)' }} /></div>
+              <div style={{ minHeight: 230, position: 'relative', display: 'grid', placeItems: 'center', isolation: 'isolate' }}>
+                <div style={{ position: 'absolute', width: 208, height: 208, border: '1px solid rgba(218,173,111,.15)', borderRadius: '50%', boxShadow: '0 0 0 22px rgba(218,173,111,.025), inset 0 0 45px rgba(218,173,111,.05)' }} />
+                <span aria-label={boss.name} style={{ fontSize: 126, zIndex: 1, filter: bossHp === 0 ? 'grayscale(1)' : 'drop-shadow(0 18px 20px rgba(0,0,0,.55))', animation: bossHp === 0 ? 'fq-ko .8s ease forwards' : bossHit ? 'fq-hit .38s ease' : 'fq-bob 3s ease-in-out infinite', opacity: bossHp === 0 ? .35 : 1, transition: 'filter .3s, opacity .3s' }}>{boss.icon}</span>
+                {damageFloats.map((float) => <span key={float.id} style={{ position: 'absolute', left: `${42 + (float.id % 4) * 6}%`, top: `${22 + (float.id % 3) * 8}%`, zIndex: 3, pointerEvents: 'none', fontSize: float.critical ? 23 : 20, fontWeight: 950, color: float.critical ? '#ffd078' : '#ff8b76', textShadow: '0 2px 12px #000, 0 0 14px rgba(255,123,98,.7)', animation: 'fq-damage 1.25s ease-out forwards', whiteSpace: 'nowrap' }}>-{float.damage} HP{float.critical ? ' · CRIT!' : ''}</span>)}
+                {bossHp === 0 && <span style={{ position: 'absolute', bottom: 10, color: '#f1c873', letterSpacing: '.16em', fontWeight: 900, fontSize: 12 }}>DEFEATED · CLAIM YOUR DROP</span>}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginTop: 8 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}><span style={{ color: '#aab8ae', fontSize: 11, background: 'rgba(226,237,232,.05)', padding: '7px 9px', borderRadius: 8 }}>Quest hit · 25 HP</span><span style={{ color: '#aab8ae', fontSize: 11, background: 'rgba(226,237,232,.05)', padding: '7px 9px', borderRadius: 8 }}>Focus hit · 25 HP</span></div>
+                <div style={{ color: criticalArmed ? '#ffd078' : '#91a197', fontSize: 11, fontWeight: 800 }}>{criticalArmed ? '⚔ CRITICAL READY · Quest hit 2×' : '✧ Siapkan Critical Strike di Inventaris'}</div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap', marginTop: 18 }}>
+                <button onClick={() => setTab('quests')} style={{ ...button, background: '#d3ad69' }}>Buka Quest Log ↗</button>
+                <button onClick={() => setTab('timer')} style={quietButton}>Mulai Focus Session</button>
+                {bossHp === 0 && <button onClick={challengeNextBoss} style={{ ...button, background: '#e18b77' }}>Tantang Boss Berikutnya</button>}
+              </div>
+              <div style={{ marginTop: 18, textAlign: 'center', color: '#aab8ae', fontSize: 11 }}>Drop boss: <strong style={{ color: '#e3c47e' }}>{boss.drop}</strong> · <strong style={{ color: '#e3c47e' }}>+{boss.dropXp} XP</strong> saat dikalahkan</div>
+            </div>
+          </section>}
 
           {tab === 'timer' && <div className="fq-content-grid" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.55fr) minmax(230px, .8fr)', gap: 16 }}>
             <section style={{ ...panel, padding: 'clamp(20px, 4vw, 34px)', textAlign: 'center' }}>
@@ -367,6 +450,7 @@ export default function App() {
             </section>
             <aside style={{ ...panel, padding: 20 }}><div style={{ color: '#d3ad69', fontWeight: 800, fontSize: 11, letterSpacing: '.14em' }}>ACTIVE EFFECTS</div><div style={{ display: 'grid', gap: 10, marginTop: 13 }}>
               <div style={{ background: 'rgba(226,237,232,.045)', borderRadius: 9, padding: 12 }}><strong style={{ fontSize: 13 }}>✦ XP Booster 2x</strong><div style={{ color: '#9eada2', fontSize: 12, marginTop: 5 }}>{activeDoubler ? `Aktif · ${Math.ceil((doublerUntil - now) / 60000)} menit tersisa` : 'Belum aktif'}</div></div>
+              <div style={{ background: 'rgba(226,237,232,.045)', borderRadius: 9, padding: 12 }}><strong style={{ fontSize: 13 }}>⚔ Critical Strike</strong><div style={{ color: '#9eada2', fontSize: 12, marginTop: 5 }}>{criticalArmed ? 'Siap · Quest hit berikutnya 2× damage' : 'Belum aktif'}</div></div>
               <div style={{ background: 'rgba(226,237,232,.045)', borderRadius: 9, padding: 12 }}><strong style={{ fontSize: 13 }}>❄ Timer Freeze</strong><div style={{ color: '#9eada2', fontSize: 12, marginTop: 5 }}>{timerFrozen ? `Timer dibekukan · ${Math.ceil((freezeUntil - now) / 60000)} menit tersisa` : 'Belum aktif'}</div></div>
               <div style={{ background: 'rgba(226,237,232,.045)', borderRadius: 9, padding: 12 }}><strong style={{ fontSize: 13 }}>⬡ Streak Shield</strong><div style={{ color: '#9eada2', fontSize: 12, marginTop: 5 }}>{shieldArmed ? 'Siap melindungi streak' : 'Tidak dipasang'}</div></div>
               <div style={{ color: '#aab8ae', fontSize: 12, lineHeight: 1.7, padding: '5px 2px' }}>Quest aktif: <strong style={{ color: '#e8eeea' }}>{activeQuests}</strong><br />Skill tersimpan: <strong style={{ color: '#e8eeea' }}>{Object.values(inventory).reduce((sum, count) => sum + count, 0)}</strong></div>
@@ -390,7 +474,7 @@ export default function App() {
               <div style={{ display: 'grid', gap: 9 }}>
                 {SKILLS.map((skill) => <div key={skill.id} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 0', borderBottom: '1px solid rgba(226,237,232,.08)' }}>
                   <span style={{ color: skill.color, fontSize: 19 }}>{skill.icon}</span>
-                  <div style={{ flex: 1 }}><strong style={{ fontSize: 13 }}>{skill.name}</strong><div style={{ color: '#93a297', fontSize: 11 }}>Jumlah: {inventory[skill.id] || 0}{skill.id === 'shield' && shieldArmed ? ' · Terpasang' : ''}</div></div>
+                  <div style={{ flex: 1 }}><strong style={{ fontSize: 13 }}>{skill.name}</strong><div style={{ color: '#93a297', fontSize: 11 }}>Jumlah: {inventory[skill.id] || 0}{skill.id === 'shield' && shieldArmed ? ' · Terpasang' : ''}{skill.id === 'critical' && criticalArmed ? ' · Siap' : ''}</div></div>
                   <button disabled={!inventory[skill.id] || (skill.id === 'shield' && shieldArmed)} onClick={() => handleUseSkill(skill.id)} style={{ ...quietButton, padding: '7px 9px', fontSize: 11, opacity: inventory[skill.id] && !(skill.id === 'shield' && shieldArmed) ? 1 : .45, cursor: inventory[skill.id] && !(skill.id === 'shield' && shieldArmed) ? 'pointer' : 'not-allowed' }}>Gunakan Skill</button>
                 </div>)}
               </div>
@@ -407,7 +491,7 @@ export default function App() {
       <footer style={{ ...container, padding: '18px 0 24px', borderTop: '1px solid rgba(218,231,220,.09)', color: '#819087', fontSize: 11, display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}><span>FOCUSQUEST · Progress tersimpan otomatis di perangkat ini.</span><span>Level {level} · {xp} total XP</span></footer>
 
       {levelToast && <div role="status" style={{ position: 'fixed', zIndex: 9, top: '50%', left: '50%', transform: 'translate(-50%,-50%)', animation: 'fq-pop .25s ease both', background: '#202e26', border: '1px solid #d3ad69', borderRadius: 14, boxShadow: '0 20px 90px #0009', padding: '24px 30px', textAlign: 'center' }}><div style={{ fontSize: 42 }}>✦</div><strong style={{ display: 'block', color: '#e4c27b', fontSize: 22, marginTop: 5 }}>LEVEL UP</strong><span style={{ color: '#d2ddd4' }}>Level {level} · {rank.title}</span></div>}
-      {bossMessage && <div role="dialog" aria-label="Boss dikalahkan" style={{ position: 'fixed', inset: 0, zIndex: 10, display: 'grid', placeContent: 'center', textAlign: 'center', background: 'rgba(9,14,12,.9)' }}><div style={{ fontSize: 80, animation: 'fq-ko 1.1s ease forwards' }}>{bossMessage.enemy.icon}</div><strong style={{ fontSize: 27, color: '#ed8c76', marginTop: 18 }}>BOSS K.O.!</strong><span style={{ color: '#e3c47e', marginTop: 8 }}>{bossMessage.enemy.name} dikalahkan · +{bossMessage.xp} XP</span></div>}
+      {bossVictory && <div role="dialog" aria-label="Kemenangan Boss Battle" style={{ position: 'fixed', inset: 0, zIndex: 12, display: 'grid', placeContent: 'center', textAlign: 'center', padding: 20, background: 'rgba(8,12,10,.9)', backdropFilter: 'blur(8px)' }}><div style={{ ...panel, maxWidth: 390, padding: '30px 35px', borderColor: 'rgba(227,196,126,.5)', animation: 'fq-pop .35s ease both' }}><div style={{ fontSize: 60, animation: 'fq-bob 1.5s ease-in-out infinite' }}>🏆</div><strong style={{ display: 'block', color: '#e3c47e', fontSize: 25, marginTop: 8 }}>VICTORY!</strong><div style={{ marginTop: 7 }}>{bossVictory.name} telah dikalahkan.</div><div style={{ marginTop: 16, padding: 12, background: 'rgba(226,237,232,.05)', borderRadius: 10, color: '#e7c67f' }}>DROP: {bossVictory.drop}<br />+{bossVictory.xp} bonus XP</div><button onClick={() => setBossVictory(null)} style={{ ...button, width: '100%', marginTop: 17 }}>Ambil Reward</button></div></div>}
     </div>
   );
 }
